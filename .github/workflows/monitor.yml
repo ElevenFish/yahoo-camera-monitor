@@ -1,0 +1,29 @@
+name: Yahoo Camera Hourly Monitor
+
+on:
+  schedule:
+    # GitHub Actions 定时器采用 UTC 标准时间（比北京时间慢 8 小时）：
+    # UTC 时间的 01:00 至 15:00 每个整点 = 北京时间的 09:00 至 23:00 每个整点
+    - cron: '0 1-15 * * *'
+  workflow_dispatch: # 开启手动运行按钮，方便随时点击测试
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 2. 安装 Python 3.11 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 3. 安装网页解析与时区依赖包
+        run: pip install requests beautifulsoup4 pytz
+
+      - name: 4. 运行雅虎拍卖监测并推送到双人微信
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
+        run: python yahoo_camera_monitor.py
