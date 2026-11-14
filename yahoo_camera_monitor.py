@@ -23,7 +23,7 @@ HEADERS = {
     "Referer": "https://auctions.yahoo.co.jp/",
 }
 
-# ==================== 1. 升级版双语监测目标（扩大召回率） ====================
+# ==================== 1. 监测目标配置（仅机身/不含镜头） ====================
 TARGETS = [
     {
         "name": "哈苏 500CX / 503CX",
@@ -63,7 +63,6 @@ TARGETS = [
     },
 ]
 
-# 精准排除词（不再误杀 "35mm" 胶片格式描述）
 EXCLUDE_KEYWORDS = [
     "レンズセット", "レンズ付", "レンズ付き", "レンズつき", "+レンズ", "＋レンズ",
     "planar", "distagon", "sonnar", "biogon", "summicron", "summilux", "elmarit", "summaron",
@@ -72,9 +71,62 @@ EXCLUDE_KEYWORDS = [
     "ファインダーのみ", "マガジンのみ", "後背のみ", "グリップのみ", "スクリーンのみ"
 ]
 
-# 正则匹配类似 "80mm f2.8" / "50mm F2" 的镜头规格
 LENS_SPEC_REGEX = re.compile(r"\b(35|45|50|55|80|90|110|120|140|150|210|250)\s*mm\s*f/?\d", re.I)
 
+
+# ==================== 2. 支付宝日元汇率获取与人民币换算模块 ====================
+
+def get_alipay_jpy_rate() -> float:
+    """
+    获取实时日元兑人民币汇率并对齐支付宝现汇卖出价（含约 0.4% 购汇点差）
+    返回: 1 日元等于多少人民币（例如 0.0475）
+    """
+    # 若用户在环境变量手动指定了固定汇率（如 0.048），优先使用
+    custom_rate = os.getenv("ALIPAY_JPY_RATE", "").strip()
+    if custom_rate:
+        try:
+            return float(custom_rate)
+        except ValueError:
+            pass
+
+    api_urls = [
+        "https://open.er-api.com/v6/latest/JPY",
+        "https://api.exchangerate-api.com/v4/latest/JPY",
+    ]
+    for api in api_urls:
+        try:
+            r = requests.get(api, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                cny_mid = data.get("rates", {}).get("CNY")
+                if cny_mid:
+                    # 支付宝跨境汇率通常比国际中间价高约 0.35%~0.45% 的购汇点差
+                    alipay_rate = round(float(cny_mid) * 1.004, 6)
+                    print(f"[汇率获取成功] 支付宝参考汇率: 100日元 ≈ {alipay_rate * 100:.2f} 人民币")
+                    return alipay_rate
+        except Exception as e:
+            print(f"[汇率接口尝试失败] {api}: {e}")
+
+    # 兜底默认汇率 (100日元 ≈ 4.75人民币)
+    default_rate = 0.0475
+    print(f"[使用兜底汇率] 100日元 ≈ {default_rate * 100:.2f} 人民币")
+    return default_rate
+
+
+def format_price_to_cny(jpy_price_str: str, jpy_to_cny_rate: float) -> str:
+    """提取日元数字并按支付宝汇率换算为人民币格式，例如: 约 ¥10,355 (218,000円)"""
+    nums = re.findall(r"[\d,]+", jpy_price_str)
+    if not nums:
+        return jpy_price_str
+    try:
+        jpy_val = int(nums[0].replace(",", ""))
+        cny_val = round(jpy_val * jpy_to_cny_rate)
+        return f"约 ¥{cny_val:,} ({jpy_val:,}円)"
+    except Exception:
+        return jpy_price_str
+
+
+# ==================== 3. 过滤与时间解析模块 ====================
 
 def is_valid_item(title: str, target: dict) -> bool:
     t_lower = title.lower()
@@ -113,8 +165,9 @@ def parse_remaining_time(time_str: str, end_timestamp_ms: str = None):
     return end_display, is_within_1h
 
 
+# ==================== 4. 雅虎拍卖三引擎抓取模块 ====================
+
 def extract_raw_products(html_text: str):
-    """三引擎解析：兼容经典 li.Product、新版 __NEXT_DATA__ JSON、以及通用 /jp/auction/ 链接"""
     soup = BeautifulSoup(html_text, "html.parser")
     raw_items = []
     seen = set()
@@ -192,7 +245,7 @@ def extract_raw_products(html_text: str):
     return raw_items
 
 
-def fetch_yahoo_auctions(target: dict, mode: str = "auction"):
+def fetch_yahoo_auctions(target: dict, jpy_rate: float, mode: str = "auction"):
     url = "https://auctions.yahoo.co.jp/search/search"
     params = {
         "p": target["query"],
@@ -213,21 +266,24 @@ def fetch_yahoo_auctions(target: dict, mode: str = "auction"):
             if not is_valid_item(item["title"], target):
                 continue
             end_info, within_1h = parse_remaining_time(item["raw_time"], item["end_ts_ms"])
+            cny_price_display = format_price_to_cny(item["price"], jpy_rate)
             results.append({
                 "model": target["name"],
                 "title": item["title"],
-                "price": item["price"],
+                "price": cny_price_display,
                 "end_info": end_info,
                 "within_1h": within_1h,
                 "link": item["link"],
             })
 
-        print(f"[诊断日志] {target['name']} ({mode}): 网页原始解析 {len(raw_items)} 条 -> 过滤后保留 {len(results)} 条")
+        print(f"[诊断日志] {target['name']} ({mode}): 原始解析 {len(raw_items)} 条 -> 过滤后保留 {len(results)} 条")
     except Exception as e:
         print(f"[ERROR] 抓取 {target['name']} ({mode}) 失败: {e}")
 
     return results
 
+
+# ==================== 5. 双人/多人微信推送模块 ====================
 
 def push_to_wechat(title: str, md_content: str):
     raw_tokens = os.getenv("PUSHPLUS_TOKEN", "")
@@ -256,15 +312,19 @@ def push_to_wechat(title: str, md_content: str):
             time.sleep(3)
 
 
+# ==================== 6. 主程序 ====================
+
 def main():
     now_str = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
+    jpy_rate = get_alipay_jpy_rate()
+
     urgent_auctions = []
     all_auctions = []
     all_fixed = []
     seen_links = set()
 
     for target in TARGETS:
-        auctions = fetch_yahoo_auctions(target, mode="auction")
+        auctions = fetch_yahoo_auctions(target, jpy_rate, mode="auction")
         for item in auctions:
             if item["link"] not in seen_links:
                 seen_links.add(item["link"])
@@ -273,14 +333,17 @@ def main():
                     urgent_auctions.append(item)
         time.sleep(1.2)
 
-        fixed_items = fetch_yahoo_auctions(target, mode="fixed")
+        fixed_items = fetch_yahoo_auctions(target, jpy_rate, mode="fixed")
         for item in fixed_items:
             if item["link"] not in seen_links:
                 seen_links.add(item["link"])
                 all_fixed.append(item)
         time.sleep(1.2)
 
-    lines = [f"### 📡 雅虎拍卖相机监测 ({now_str} 北京时间)\n"]
+    lines = [
+        f"### 📡 雅虎拍卖相机监测 ({now_str} 北京时间)",
+        f"> 💱 **当前支付宝日元换算汇率参考**：`100 日元 ≈ {jpy_rate * 100:.2f} 人民币`\n"
+    ]
 
     lines.append(f"#### 🚨 一、 距拍卖结束不足 1 小时的商品 ({len(urgent_auctions)}件)")
     if not urgent_auctions:
@@ -288,10 +351,10 @@ def main():
     else:
         for i, it in enumerate(urgent_auctions, 1):
             lines.append(
-                f"{i}. 🔥 **[{it['model']}]** | 价格: `{it['price']}`\n"
+                f"{i}. 🔥 **[{it['model']}]** | 折合人民币: **`{it['price']}`**\n"
                 f"   - 简介: {it['title']}\n"
                 f"   - 结束时间: **{it['end_info']}**\n"
-                f"   - 拍卖链接: [点击查看]({it['link']})\n"
+                f"   - 拍卖链接: [点击直达雅虎拍卖]({it['link']})\n"
             )
 
     lines.append(f"\n#### 🔨 二、 拍卖商品列表 ({len(all_auctions)}件)")
@@ -301,7 +364,7 @@ def main():
         for i, it in enumerate(all_auctions[:25], 1):
             flag = "🔥[不足1小时] " if it["within_1h"] else ""
             lines.append(
-                f"{i}. {flag}**[{it['model']}]** | 价格: `{it['price']}`\n"
+                f"{i}. {flag}**[{it['model']}]** | 价格: **`{it['price']}`**\n"
                 f"   - 简介: {it['title']}\n"
                 f"   - 结束时间: {it['end_info']}\n"
                 f"   - 拍卖链接: [点击查看]({it['link']})"
@@ -313,7 +376,7 @@ def main():
     else:
         for i, it in enumerate(all_fixed[:25], 1):
             lines.append(
-                f"{i}. **[{it['model']}]** | 在售价: `{it['price']}`\n"
+                f"{i}. **[{it['model']}]** | 在售价: **`{it['price']}`**\n"
                 f"   - 简介: {it['title']}\n"
                 f"   - 在售链接: [点击查看]({it['link']})"
             )
