@@ -2,9 +2,9 @@ name: Yahoo Camera Hourly Monitor
 
 on:
   schedule:
-    # UTC 00:00 至 19:00 每个整点 = 北京时间 08:00 至次日凌晨 03:00 每个整点
-    - cron: '0 0-19 * * *'
-  workflow_dispatch: # 保留手动一键测试按钮
+    # UTC 01:00 至 15:00 的每个整点 = 北京时间 09:00 至 23:00 的每个整点
+    - cron: '0 1-15 * * *'
+  workflow_dispatch:
 
 jobs:
   monitor:
@@ -18,11 +18,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 3. 安装依赖包
-        run: pip install requests beautifulsoup4 pytz
+      - name: 3. 安装依赖包 (含 curl_cffi 浏览器指纹模拟)
+        run: pip install curl_cffi requests beautifulsoup4 pytz
 
       - name: 4. 运行雅虎拍卖监测并推送到双人微信
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
+          PUSHPLUS_TOKEN_2: ${{ secrets.PUSHPLUS_TOKEN_2 }}
         run: python yahoo_camera_monitor.py
